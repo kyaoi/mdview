@@ -12,7 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
-	"github.com/charmbracelet/glamour/ansi"
+	styles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -37,12 +37,21 @@ type initialState struct {
 }
 
 var (
-	treeBlurBorderColor  = lipgloss.Color("#3a5a8c")
-	treeFocusBorderColor = lipgloss.Color("#bcd7ff")
-	treeLineStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#e0ebff"))
-	treeSelectedActive   = lipgloss.NewStyle().Foreground(lipgloss.Color("#0c1a30")).Background(lipgloss.Color("#bcd7ff")).Bold(true)
-	treeSelectedInactive = lipgloss.NewStyle().Foreground(lipgloss.Color("#bcd7ff")).Background(lipgloss.Color("#22365d"))
-	helpBoxStyle         = lipgloss.NewStyle().Padding(1, 2).BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#bcd7ff")).Background(lipgloss.Color("#1a2e52"))
+	treeBlurBorderColor  = lipgloss.Color("#3b4261")
+	treeFocusBorderColor = lipgloss.Color("#7aa2f7")
+	treeLineStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#a9b1d6"))
+	treeSelectedActive   = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#1a1b26")).
+				Background(lipgloss.Color("#7aa2f7")).
+				Bold(true)
+	treeSelectedInactive = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#c0caf5")).
+				Background(lipgloss.Color("#283457"))
+	helpBoxStyle = lipgloss.NewStyle().
+			Padding(1, 2).
+			BorderStyle(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#7aa2f7")).
+			Background(lipgloss.Color("#1f2335"))
 )
 
 type model struct {
@@ -241,13 +250,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) handleContentKey(key string) bool {
 	switch key {
 	case "j":
-		m.contentVP.LineDown(1)
+		m.contentVP.ScrollDown(1)
 	case "k":
-		m.contentVP.LineUp(1)
+		m.contentVP.ScrollUp(1)
 	case "ctrl+d":
-		m.contentVP.HalfViewDown()
+		m.contentVP.HalfPageDown()
 	case "ctrl+u":
-		m.contentVP.HalfViewUp()
+		m.contentVP.HalfPageUp()
 	case "h":
 		m.contentVP.ScrollLeft(max(2, m.contentVP.Width/6))
 	case "l":
@@ -282,9 +291,9 @@ func (m *model) handleTreeKey(key string) bool {
 		m.moveTreeSelection(-1)
 		return true
 	case "ctrl+d":
-		m.contentVP.LineDown(1)
+		m.contentVP.ScrollDown(1)
 	case "ctrl+u":
-		m.contentVP.LineUp(1)
+		m.contentVP.ScrollUp(1)
 	case "l", "right":
 		m.openOrDescend()
 		return true
@@ -754,19 +763,6 @@ func isMarkdown(name string) bool {
 	return strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".markdown")
 }
 
-func chooseDefaultFile(files []string) string {
-	if len(files) == 0 {
-		return ""
-	}
-	for _, candidate := range files {
-		base := strings.ToLower(filepath.Base(candidate))
-		if base == "readme.md" || base == "readme.markdown" {
-			return candidate
-		}
-	}
-	return files[0]
-}
-
 func buildTree(rootName string, files []string) *treeEntry {
 	root := &treeEntry{name: rootName, path: "", isDir: true, open: true}
 	for _, rel := range files {
@@ -837,86 +833,13 @@ func composeDisplayPath(root, rel string) string {
 }
 
 func newRenderer(width int) (*glamour.TermRenderer, error) {
-	style := customStyle()
-	opts := []glamour.TermRendererOption{glamour.WithStyles(style)}
+	opts := []glamour.TermRendererOption{glamour.WithStandardStyle(styles.TokyoNightStyle)}
 	if width > 0 {
 		opts = append(opts, glamour.WithWordWrap(width))
 	} else {
 		opts = append(opts, glamour.WithWordWrap(0))
 	}
 	return glamour.NewTermRenderer(opts...)
-}
-
-func customStyle() ansi.StyleConfig {
-	truePtr := func() *bool { b := true; return &b }
-	documentColor := "#f3f6ff"
-	heading1Color := "#c4dcff"
-	heading2Color := "#a9cbff"
-	heading3Color := "#8db6ff"
-	codeBg := "#1b3158"
-	codeFg := "#f2f6ff"
-	inlineCodeBg := "#16284b"
-	inlineCodeFg := "#f2f6ff"
-
-	mutScheme := ansi.StyleConfig{
-		Document: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Color:       &documentColor,
-				BlockPrefix: "",
-				BlockSuffix: "",
-			},
-			Margin: uintPtr(0),
-		},
-		Paragraph: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{},
-		},
-		List: ansi.StyleList{
-			StyleBlock: ansi.StyleBlock{
-				StylePrimitive: ansi.StylePrimitive{},
-			},
-			LevelIndent: 2,
-		},
-		Heading: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Bold: truePtr(),
-			},
-		},
-		H1: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Bold:  truePtr(),
-				Color: &heading1Color,
-			},
-		},
-		H2: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Bold:  truePtr(),
-				Color: &heading2Color,
-			},
-		},
-		H3: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Bold:  truePtr(),
-				Color: &heading3Color,
-			},
-		},
-		CodeBlock: ansi.StyleCodeBlock{
-			StyleBlock: ansi.StyleBlock{
-				StylePrimitive: ansi.StylePrimitive{
-					Color:           &codeFg,
-					BackgroundColor: &codeBg,
-				},
-			},
-		},
-		Code: ansi.StyleBlock{
-			StylePrimitive: ansi.StylePrimitive{
-				Color:           &inlineCodeFg,
-				BackgroundColor: &inlineCodeBg,
-			},
-		},
-		Link:     ansi.StylePrimitive{Color: &heading2Color},
-		LinkText: ansi.StylePrimitive{Color: &heading2Color, Underline: truePtr()},
-	}
-	return mutScheme
 }
 
 func clamp(value, low, high int) int {
@@ -935,5 +858,3 @@ func max(a, b int) int {
 	}
 	return b
 }
-
-func uintPtr(v uint) *uint { return &v }
