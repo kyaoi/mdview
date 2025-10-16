@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	styles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/kyaoi/mdview/internal/tree"
 )
@@ -63,11 +64,26 @@ type Model struct {
 	rootDir       string
 	displayRoot   string
 	activeAbsPath string
+
+	watcher          *fsnotify.Watcher
+	watchDir         string
+	watchedFile      string
+	watchChan        chan tea.Msg
+	initialWatchPath string
 }
 
 type treeLine struct {
 	entry *tree.Node
 	label string
+}
+
+type fileEventMsg struct {
+	path string
+	op   fsnotify.Op
+}
+
+type fileWatchErrMsg struct {
+	err error
 }
 
 // NewModel constructs the viewer model with the provided initial state.
@@ -93,6 +109,10 @@ func NewModel(state State) *Model {
 		activeAbsPath:      state.ActiveAbsPath,
 	}
 
+	if state.ActiveAbsPath != "" {
+		m.initialWatchPath = state.ActiveAbsPath
+	}
+
 	if m.treeRoot != nil {
 		m.refreshTreeViewWithSelection(state.TreeSelectionPath)
 	}
@@ -106,7 +126,14 @@ func NewModel(state State) *Model {
 }
 
 // Init implements tea.Model.
-func (m *Model) Init() tea.Cmd { return nil }
+func (m *Model) Init() tea.Cmd {
+	if m.initialWatchPath != "" {
+		path := m.initialWatchPath
+		m.initialWatchPath = ""
+		return m.startWatching(path)
+	}
+	return nil
+}
 
 // View implements tea.Model.
 func (m *Model) View() string {
@@ -145,6 +172,11 @@ func (m *Model) View() string {
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case fileEventMsg:
+		return m, m.handleFileEvent(msg)
+	case fileWatchErrMsg:
+		m.err = msg.err
+		return m, m.waitForFileEvent()
 	case tea.WindowSizeMsg:
 		m.resize(msg.Width, msg.Height)
 		return m, nil
@@ -191,8 +223,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.treeFocus && m.treeVisible {
-			if m.handleTreeKey(key) {
-				return m, nil
+			handled, cmd := m.handleTreeKey(key)
+			if handled {
+				return m, cmd
+			}
+			if cmd != nil {
+				return m, cmd
 			}
 			return m, nil
 		}
@@ -244,38 +280,38 @@ func (m *Model) handleContentKey(key string) bool {
 	return true
 }
 
-func (m *Model) handleTreeKey(key string) bool {
+func (m *Model) handleTreeKey(key string) (bool, tea.Cmd) {
 	if m.treeRoot == nil {
-		return false
+		return false, nil
 	}
 	switch key {
 	case "j":
 		m.moveTreeSelection(1)
-		return true
+		return true, nil
 	case "k":
 		m.moveTreeSelection(-1)
-		return true
+		return true, nil
 	case "ctrl+d":
 		step := max(1, m.treeVP.Height/2)
 		m.moveTreeSelection(step)
-		return true
+		return true, nil
 	case "ctrl+u":
 		step := max(1, m.treeVP.Height/2)
 		m.moveTreeSelection(-step)
-		return true
+		return true, nil
 	case "ctrl+j":
 		m.contentVP.ScrollDown(1)
+		return true, nil
 	case "ctrl+k":
 		m.contentVP.ScrollUp(1)
+		return true, nil
 	case "l", "right":
-		m.openOrDescend()
-		return true
+		return true, m.openOrDescend()
 	case "h", "left":
 		m.closeOrAscend()
-		return true
+		return true, nil
 	case "enter":
-		m.openOrDescend()
-		return true
+		return true, m.openOrDescend()
 	case "g":
 		if m.pendingKey == "g" {
 			if len(m.flatTree) > 0 {
@@ -287,7 +323,7 @@ func (m *Model) handleTreeKey(key string) bool {
 		} else {
 			m.pendingKey = "g"
 		}
-		return true
+		return true, nil
 	case "G":
 		m.pendingKey = ""
 		if len(m.flatTree) > 0 {
@@ -295,10 +331,10 @@ func (m *Model) handleTreeKey(key string) bool {
 			m.updateTreeContent(m.treeContentWidth)
 			m.ensureSelectionVisible()
 		}
-		return true
+		return true, nil
 	}
 	m.pendingKey = ""
-	return false
+	return false, nil
 }
 
 func (m *Model) resize(width, height int) {
@@ -385,29 +421,29 @@ func (m *Model) moveTreeSelection(delta int) {
 	m.updateTreeContent(m.treeContentWidth)
 }
 
-func (m *Model) openOrDescend() {
+func (m *Model) openOrDescend() tea.Cmd {
 	entry := m.currentTreeEntry()
 	if entry == nil {
-		return
+		return nil
 	}
 	if entry.IsDir {
 		if !entry.Open {
 			entry.Open = true
 			if !m.loadNode(entry) {
-				return
+				return nil
 			}
 			m.refreshTreeViewWithSelection(entry.Path)
-			return
+			return nil
 		}
 		if !m.loadNode(entry) {
-			return
+			return nil
 		}
 		if len(entry.Children) > 0 {
 			m.moveTreeSelection(1)
 		}
-		return
+		return nil
 	}
-	m.openFileEntry(entry)
+	return m.openFileEntry(entry)
 }
 
 func (m *Model) closeOrAscend() {
@@ -439,21 +475,25 @@ func (m *Model) currentTreeEntry() *tree.Node {
 	return m.flatTree[m.treeSelection].entry
 }
 
-func (m *Model) openFileEntry(entry *tree.Node) {
+func (m *Model) openFileEntry(entry *tree.Node) tea.Cmd {
 	if m.rootDir == "" {
-		return
+		return nil
 	}
 	absPath := filepath.Join(m.rootDir, filepath.FromSlash(entry.Path))
 	data, err := os.ReadFile(absPath)
 	if err != nil {
 		m.err = err
-		return
+		return nil
 	}
 	m.rawContent = string(data)
 	m.activeAbsPath = absPath
 	m.headerPath = composeDisplayPath(m.displayRoot, entry.Path)
 	m.renderMarkdown()
 	m.contentVP.GotoTop()
+	if m.err != nil {
+		return nil
+	}
+	return m.startWatching(absPath)
 }
 
 func (m *Model) renderMarkdown() {
@@ -693,4 +733,113 @@ func (m *Model) loadNode(node *tree.Node) bool {
 		return false
 	}
 	return true
+}
+
+func (m *Model) startWatching(path string) tea.Cmd {
+	if path == "" {
+		return nil
+	}
+	path = filepath.Clean(path)
+	if err := m.ensureWatcher(); err != nil {
+		m.err = err
+		return nil
+	}
+
+	dir := filepath.Dir(path)
+	if dir != m.watchDir {
+		if m.watchDir != "" {
+			_ = m.watcher.Remove(m.watchDir)
+		}
+		if err := m.watcher.Add(dir); err != nil {
+			m.err = err
+			return nil
+		}
+		m.watchDir = dir
+	}
+
+	m.watchedFile = path
+	return m.waitForFileEvent()
+}
+
+func (m *Model) ensureWatcher() error {
+	if m.watcher != nil {
+		return nil
+	}
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	m.watcher = watcher
+	m.watchChan = make(chan tea.Msg, 10)
+
+	go m.watchLoop()
+	return nil
+}
+
+func (m *Model) watchLoop() {
+	for {
+		select {
+		case event, ok := <-m.watcher.Events:
+			if !ok {
+				return
+			}
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove) == 0 {
+				continue
+			}
+			if m.watchChan != nil {
+				m.watchChan <- fileEventMsg{path: event.Name, op: event.Op}
+			}
+		case err, ok := <-m.watcher.Errors:
+			if !ok {
+				return
+			}
+			if m.watchChan != nil {
+				m.watchChan <- fileWatchErrMsg{err: err}
+			}
+		}
+	}
+}
+
+func (m *Model) waitForFileEvent() tea.Cmd {
+	if m.watchChan == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		msg, ok := <-m.watchChan
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func (m *Model) handleFileEvent(msg fileEventMsg) tea.Cmd {
+	if m.watchedFile == "" {
+		return m.waitForFileEvent()
+	}
+
+	if filepath.Clean(msg.path) != filepath.Clean(m.watchedFile) {
+		return m.waitForFileEvent()
+	}
+
+	m.reloadActiveFile()
+	return m.waitForFileEvent()
+}
+
+func (m *Model) reloadActiveFile() {
+	if m.activeAbsPath == "" {
+		return
+	}
+	data, err := os.ReadFile(m.activeAbsPath)
+	if err != nil {
+		m.err = err
+		return
+	}
+
+	offset := m.contentVP.YOffset
+	m.rawContent = string(data)
+	m.renderMarkdown()
+	if m.err == nil {
+		m.contentVP.SetYOffset(offset)
+	}
 }

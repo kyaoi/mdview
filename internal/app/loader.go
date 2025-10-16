@@ -17,8 +17,13 @@ func LoadInitialState(target string) (ui.State, error) {
 	}
 
 	if info.IsDir() {
-		rootName := filepath.Base(target)
-		loader := tree.NewFSLoader(target)
+		absTarget, err := filepath.Abs(target)
+		if err != nil {
+			return ui.State{}, err
+		}
+
+		rootName := filepath.Base(absTarget)
+		loader := tree.NewFSLoader(absTarget)
 		root := tree.NewRoot(rootName, loader)
 
 		hasMarkdown, err := loader.HasMarkdown("")
@@ -32,7 +37,7 @@ func LoadInitialState(target string) (ui.State, error) {
 				HeaderPath:        rootName + "/",
 				TreeVisible:       true,
 				TreeRoot:          root,
-				RootDir:           target,
+				RootDir:           absTarget,
 				DisplayRoot:       rootName,
 				TreeSelectionPath: "",
 				FocusTree:         true,
@@ -45,27 +50,33 @@ func LoadInitialState(target string) (ui.State, error) {
 			TreeVisible:       true,
 			TreeRoot:          root,
 			TreeSelectionPath: "",
-			RootDir:           target,
+			RootDir:           absTarget,
 			DisplayRoot:       rootName,
 			ActiveAbsPath:     "",
 			FocusTree:         true,
 		}, nil
 	}
 
-	data, err := os.ReadFile(target)
+	absTarget, err := filepath.Abs(target)
 	if err != nil {
 		return ui.State{}, err
 	}
 
-	displayPath := target
+	data, err := os.ReadFile(absTarget)
+	if err != nil {
+		return ui.State{}, err
+	}
+
+	displayPath := absTarget
 	if wd, err := os.Getwd(); err == nil {
-		if rel, err := filepath.Rel(wd, target); err == nil {
+		if rel, err := filepath.Rel(wd, absTarget); err == nil {
 			displayPath = rel
 		}
 	}
 
 	return ui.State{
-		RawContent: string(data),
-		HeaderPath: filepath.ToSlash(displayPath),
+		RawContent:    string(data),
+		HeaderPath:    filepath.ToSlash(displayPath),
+		ActiveAbsPath: absTarget,
 	}, nil
 }
