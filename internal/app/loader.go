@@ -2,11 +2,8 @@ package app
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/kyaoi/mdview/internal/tree"
 	"github.com/kyaoi/mdview/internal/ui"
@@ -20,21 +17,21 @@ func LoadInitialState(target string) (ui.State, error) {
 	}
 
 	if info.IsDir() {
-		files, err := collectMarkdownFiles(target)
+		rootName := filepath.Base(target)
+		loader := tree.NewFSLoader(target)
+		root := tree.NewRoot(rootName, loader)
+
+		hasMarkdown, err := loader.HasMarkdown("")
 		if err != nil {
 			return ui.State{}, err
 		}
-
-		rootName := filepath.Base(target)
-		treeRoot := tree.Build(rootName, files)
-
-		if len(files) == 0 {
+		if !hasMarkdown {
 			message := fmt.Sprintf("%s にMarkdownファイルが見つかりません。", rootName)
 			return ui.State{
 				RawContent:        message,
 				HeaderPath:        rootName + "/",
 				TreeVisible:       true,
-				TreeRoot:          treeRoot,
+				TreeRoot:          root,
 				RootDir:           target,
 				DisplayRoot:       rootName,
 				TreeSelectionPath: "",
@@ -46,7 +43,7 @@ func LoadInitialState(target string) (ui.State, error) {
 			RawContent:        "",
 			HeaderPath:        rootName + "/",
 			TreeVisible:       true,
-			TreeRoot:          treeRoot,
+			TreeRoot:          root,
 			TreeSelectionPath: "",
 			RootDir:           target,
 			DisplayRoot:       rootName,
@@ -71,49 +68,4 @@ func LoadInitialState(target string) (ui.State, error) {
 		RawContent: string(data),
 		HeaderPath: filepath.ToSlash(displayPath),
 	}, nil
-}
-
-func collectMarkdownFiles(root string) ([]string, error) {
-	var files []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if shouldSkipDir(d.Name()) && path != root {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if isMarkdown(d.Name()) {
-			rel, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			files = append(files, filepath.ToSlash(rel))
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	sort.Slice(files, func(i, j int) bool {
-		return strings.ToLower(files[i]) < strings.ToLower(files[j])
-	})
-	return files, nil
-}
-
-func shouldSkipDir(name string) bool {
-	lower := strings.ToLower(name)
-	switch lower {
-	case ".git", "node_modules", ".hg", ".svn", ".idea", ".vscode":
-		return true
-	}
-	return false
-}
-
-func isMarkdown(name string) bool {
-	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".markdown")
 }

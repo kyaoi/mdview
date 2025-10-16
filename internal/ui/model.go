@@ -255,9 +255,9 @@ func (m *Model) handleTreeKey(key string) bool {
 	case "k":
 		m.moveTreeSelection(-1)
 		return true
-	case "ctrl+d":
+	case "ctrl+j":
 		m.contentVP.ScrollDown(1)
-	case "ctrl+u":
+	case "ctrl+k":
 		m.contentVP.ScrollUp(1)
 	case "l", "right":
 		m.openOrDescend()
@@ -385,7 +385,13 @@ func (m *Model) openOrDescend() {
 	if entry.IsDir {
 		if !entry.Open {
 			entry.Open = true
+			if !m.loadNode(entry) {
+				return
+			}
 			m.refreshTreeViewWithSelection(entry.Path)
+			return
+		}
+		if !m.loadNode(entry) {
 			return
 		}
 		if len(entry.Children) > 0 {
@@ -459,6 +465,9 @@ func (m *Model) refreshTreeViewWithSelection(path string) {
 	if m.treeRoot == nil {
 		return
 	}
+	if !m.loadNode(m.treeRoot) {
+		return
+	}
 	m.expandPath(path)
 	maxWidth := m.rebuildFlatTree()
 	if len(m.flatTree) > 0 {
@@ -484,6 +493,9 @@ func (m *Model) expandPath(path string) {
 	parts := strings.Split(path, "/")
 	current := m.treeRoot
 	for _, part := range parts {
+		if !m.loadNode(current) {
+			return
+		}
 		child := current.ChildByName(part)
 		if child == nil {
 			return
@@ -510,6 +522,9 @@ func (m *Model) rebuildFlatTree() int {
 		}
 		lines = append(lines, treeLine{entry: node, label: label})
 		if node.IsDir && node.Open {
+			if !m.loadNode(node) {
+				return
+			}
 			for _, child := range node.Children {
 				walk(child, depth+1)
 			}
@@ -523,6 +538,9 @@ func (m *Model) rebuildFlatTree() int {
 func (m *Model) updateTreeContent(width int) {
 	if m.treeRoot == nil {
 		return
+	}
+	if width <= 0 {
+		width = minTreePanelWidth
 	}
 	var builder strings.Builder
 	for i, line := range m.flatTree {
@@ -656,4 +674,15 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m *Model) loadNode(node *tree.Node) bool {
+	if node == nil {
+		return false
+	}
+	if err := node.EnsureLoaded(); err != nil {
+		m.err = err
+		return false
+	}
+	return true
 }
