@@ -255,6 +255,14 @@ func (m *Model) handleTreeKey(key string) bool {
 	case "k":
 		m.moveTreeSelection(-1)
 		return true
+	case "ctrl+d":
+		step := max(1, m.treeVP.Height/2)
+		m.moveTreeSelection(step)
+		return true
+	case "ctrl+u":
+		step := max(1, m.treeVP.Height/2)
+		m.moveTreeSelection(-step)
+		return true
 	case "ctrl+j":
 		m.contentVP.ScrollDown(1)
 	case "ctrl+k":
