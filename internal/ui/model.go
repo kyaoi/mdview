@@ -1,15 +1,18 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	styles "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/kyaoi/mdview/internal/tree"
@@ -38,6 +41,10 @@ var (
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#7aa2f7")).
 			Background(lipgloss.Color("#1f2335"))
+	searchBarStyle = lipgloss.NewStyle().
+			Padding(0, 1).
+			Foreground(lipgloss.Color("#a9b1d6")).
+			Background(lipgloss.Color("#1f2335"))
 )
 
 // Model implements the Bubble Tea program for the markdown viewer.
@@ -58,12 +65,19 @@ type Model struct {
 	height             int
 	err                error
 
-	treeRoot      *tree.Node
-	flatTree      []treeLine
-	treeSelection int
-	rootDir       string
-	displayRoot   string
-	activeAbsPath string
+	treeRoot        *tree.Node
+	flatTree        []treeLine
+	treeSelection   int
+	rootDir         string
+	displayRoot     string
+	activeAbsPath   string
+	renderedContent string
+
+	searchInput   textinput.Model
+	searchActive  bool
+	searchQuery   string
+	searchMatches []int
+	searchIndex   int
 
 	watcher          *fsnotify.Watcher
 	watchDir         string
@@ -107,7 +121,16 @@ func NewModel(state State) *Model {
 		rootDir:            state.RootDir,
 		displayRoot:        state.DisplayRoot,
 		activeAbsPath:      state.ActiveAbsPath,
+		searchIndex:        -1,
 	}
+
+	searchInput := textinput.New()
+	searchInput.Prompt = "/"
+	searchInput.CharLimit = 256
+	searchInput.Placeholder = "検索語"
+	searchInput.CursorEnd()
+	searchInput.Blur()
+	m.searchInput = searchInput
 
 	if state.ActiveAbsPath != "" {
 		m.initialWatchPath = state.ActiveAbsPath
@@ -156,6 +179,8 @@ func (m *Model) View() string {
 			"gg / G           : 先頭 / 末尾へ移動",
 			"h / l            : ツリー開閉・水平スクロール",
 			"Enter / l        : ツリーでファイルを開く",
+			"/                : 検索モード開始",
+			"n / N            : 次 / 前の一致へ移動",
 			"t                : ツリー表示のトグル",
 			"q / Ctrl+c       : 終了",
 		}, "\n")
@@ -164,6 +189,15 @@ func (m *Model) View() string {
 			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, helpOverlay)
 		}
 		return helpOverlay
+	}
+
+	if m.searchActive {
+		body = lipgloss.JoinVertical(lipgloss.Left, body, searchBarStyle.Render(m.searchInput.View()))
+	} else if m.searchQuery != "" {
+		status := m.searchStatusLine()
+		if status != "" {
+			body = lipgloss.JoinVertical(lipgloss.Left, body, searchBarStyle.Render(status))
+		}
 	}
 
 	return body
@@ -182,6 +216,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.searchActive {
+			switch msg.Type {
+			case tea.KeyEnter:
+				query := strings.TrimSpace(m.searchInput.Value())
+				m.exitSearchMode()
+				if query == "" {
+					m.clearSearch()
+					return m, nil
+				}
+				m.performSearch(query, true)
+				return m, nil
+			case tea.KeyEsc, tea.KeyCtrlC:
+				m.exitSearchMode()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			return m, cmd
+		}
+
 		key := msg.String()
 		if key != "g" {
 			m.pendingKey = ""
@@ -220,6 +274,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resize(m.width, m.height)
 			}
 			return m, nil
+		case "/":
+			return m, m.enterSearchMode()
+		case "n":
+			if len(m.searchMatches) > 0 {
+				m.nextSearchMatch()
+				return m, nil
+			}
+		case "N":
+			if len(m.searchMatches) > 0 {
+				m.previousSearchMatch()
+				return m, nil
+			}
 		}
 
 		if m.treeFocus && m.treeVisible {
@@ -378,6 +444,8 @@ func (m *Model) resize(width, height int) {
 	}
 	m.err = nil
 	m.contentVP.SetContent(rendered)
+	m.renderedContent = rendered
+	m.onContentChanged()
 
 	if m.treeVisible && treeWidth > 0 {
 		m.treeVP.Width = treeWidth
@@ -507,6 +575,8 @@ func (m *Model) renderMarkdown() {
 	}
 	m.err = nil
 	m.contentVP.SetContent(rendered)
+	m.renderedContent = rendered
+	m.onContentChanged()
 }
 
 func (m *Model) refreshTreeViewWithSelection(path string) {
@@ -733,6 +803,172 @@ func (m *Model) loadNode(node *tree.Node) bool {
 		return false
 	}
 	return true
+}
+
+func (m *Model) enterSearchMode() tea.Cmd {
+	m.searchActive = true
+	m.pendingKey = ""
+	if m.searchQuery != "" {
+		m.searchInput.SetValue(m.searchQuery)
+		m.searchInput.CursorEnd()
+	} else {
+		m.searchInput.SetValue("")
+	}
+	return m.searchInput.Focus()
+}
+
+func (m *Model) exitSearchMode() {
+	m.searchActive = false
+	m.searchInput.Blur()
+}
+
+func (m *Model) clearSearch() {
+	m.searchQuery = ""
+	m.searchMatches = nil
+	m.searchIndex = -1
+	m.err = nil
+}
+
+func (m *Model) searchStatusLine() string {
+	if m.searchQuery == "" {
+		return ""
+	}
+	total := len(m.searchMatches)
+	if total == 0 || m.searchIndex < 0 {
+		return fmt.Sprintf("/%s (0/0)", m.searchQuery)
+	}
+	current := m.searchIndex + 1
+	return fmt.Sprintf("/%s (%d/%d)", m.searchQuery, current, total)
+}
+
+func (m *Model) performSearch(query string, resetIndex bool) {
+	query = strings.TrimSpace(query)
+	m.searchQuery = query
+	m.searchMatches = findSearchMatches(m.renderedContent, query)
+	if len(m.searchMatches) == 0 {
+		m.searchIndex = -1
+		m.err = fmt.Errorf("%q に一致しません。", query)
+		return
+	}
+	if resetIndex || m.searchIndex < 0 || m.searchIndex >= len(m.searchMatches) {
+		m.searchIndex = 0
+	}
+	m.err = nil
+	m.gotoSearchMatch()
+}
+
+func (m *Model) nextSearchMatch() {
+	if len(m.searchMatches) == 0 {
+		return
+	}
+	if m.searchIndex < 0 {
+		m.searchIndex = 0
+	} else {
+		m.searchIndex = (m.searchIndex + 1) % len(m.searchMatches)
+	}
+	m.err = nil
+	m.gotoSearchMatch()
+}
+
+func (m *Model) previousSearchMatch() {
+	if len(m.searchMatches) == 0 {
+		return
+	}
+	if m.searchIndex <= 0 {
+		m.searchIndex = len(m.searchMatches) - 1
+	} else {
+		m.searchIndex--
+	}
+	m.err = nil
+	m.gotoSearchMatch()
+}
+
+func (m *Model) gotoSearchMatch() {
+	if len(m.searchMatches) == 0 || m.searchIndex < 0 {
+		return
+	}
+	totalLines := strings.Count(m.renderedContent, "\n") + 1
+	if totalLines <= 0 {
+		return
+	}
+	targetLine := m.searchMatches[m.searchIndex]
+	maxOffset := max(totalLines-m.contentVP.Height, 0)
+	offset := clamp(targetLine, 0, maxOffset)
+	m.contentVP.SetYOffset(offset)
+}
+
+func (m *Model) onContentChanged() {
+	if m.searchQuery == "" {
+		return
+	}
+
+	prevLine := -1
+	if len(m.searchMatches) > 0 && m.searchIndex >= 0 && m.searchIndex < len(m.searchMatches) {
+		prevLine = m.searchMatches[m.searchIndex]
+	}
+
+	m.searchMatches = findSearchMatches(m.renderedContent, m.searchQuery)
+	if len(m.searchMatches) == 0 {
+		m.searchIndex = -1
+		m.err = fmt.Errorf("%q に一致しません。", m.searchQuery)
+		return
+	}
+
+	if prevLine >= 0 {
+		m.searchIndex = closestMatchIndex(m.searchMatches, prevLine)
+	} else if m.searchIndex < 0 || m.searchIndex >= len(m.searchMatches) {
+		m.searchIndex = 0
+	}
+	m.err = nil
+	m.gotoSearchMatch()
+}
+
+func findSearchMatches(content, query string) []int {
+	query = strings.TrimSpace(query)
+	if query == "" || content == "" {
+		return nil
+	}
+
+	stripped := ansi.Strip(content)
+	lowerContent := strings.ToLower(stripped)
+	lowerQuery := strings.ToLower(query)
+
+	var matches []int
+	offset := 0
+	for {
+		pos := strings.Index(lowerContent[offset:], lowerQuery)
+		if pos == -1 {
+			break
+		}
+		absolute := offset + pos
+		line := strings.Count(stripped[:absolute], "\n")
+		matches = append(matches, line)
+		offset = absolute + len(lowerQuery)
+	}
+	return matches
+}
+
+func closestMatchIndex(matches []int, line int) int {
+	if len(matches) == 0 {
+		return 0
+	}
+	bestIndex := 0
+	bestDiff := absInt(matches[0] - line)
+	for i := 1; i < len(matches); i++ {
+		diff := absInt(matches[i] - line)
+		if diff < bestDiff {
+			bestDiff = diff
+			bestIndex = i
+		}
+	}
+	return bestIndex
+}
+
+func absInt(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func (m *Model) startWatching(path string) tea.Cmd {
