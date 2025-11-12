@@ -176,6 +176,7 @@ func (m *Model) View() string {
 			"Ctrl+h / Ctrl+l : ツリー↔本文フォーカス切替",
 			"j / k            : 選択/スクロール (フォーカス中のペイン)",
 			"Ctrl+d / Ctrl+u : 半ページ移動 (本文フォーカス時)",
+			"Ctrl+f / Ctrl+b : 半ページ移動 (ツリーフォーカス時)",
 			"gg / G           : 先頭 / 末尾へ移動",
 			"h / l            : ツリー開閉・水平スクロール",
 			"Enter / l        : ツリーでファイルを開く",
@@ -370,6 +371,14 @@ func (m *Model) handleTreeKey(key string) (bool, tea.Cmd) {
 		return true, nil
 	case "ctrl+k":
 		m.contentVP.ScrollUp(1)
+		return true, nil
+	case "ctrl+f":
+		step := max(1, m.contentVP.Height/2)
+		m.contentVP.ScrollDown(step)
+		return true, nil
+	case "ctrl+b":
+		step := max(1, m.contentVP.Height/2)
+		m.contentVP.ScrollUp(step)
 		return true, nil
 	case "l", "right":
 		return true, m.openOrDescend()
