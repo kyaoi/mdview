@@ -76,12 +76,7 @@ func runTagSelection(path string) error {
 	}
 
 	tag := index.tags[selection]
-	files := index.filesByTag[tag]
-	fmt.Printf("タグ \"%s\" を含むファイル:\n", tag)
-	for _, file := range files {
-		fmt.Printf("  - %s\n", file)
-	}
-	return nil
+	return launchFilteredView(index, tag)
 }
 
 func readFrontMatterTags(path string) ([]string, error) {
@@ -181,8 +176,10 @@ func promptTagSelection(limit int) (int, bool, error) {
 }
 
 type tagIndex struct {
-	tags       []string
-	filesByTag map[string][]string
+	rootDir     string
+	displayRoot string
+	tags        []string
+	filesByTag  map[string][]string
 }
 
 func (ti *tagIndex) add(tag, file string) {
@@ -226,25 +223,50 @@ func printTagMenu(index tagIndex) {
 	fmt.Println("  0) キャンセル")
 }
 
+func launchFilteredView(index tagIndex, tag string) error {
+	files := index.filesByTag[tag]
+	if len(files) == 0 {
+		fmt.Printf("タグ \"%s\" に一致するファイルがありません。\n", tag)
+		return nil
+	}
+	if index.rootDir == "" {
+		return fmt.Errorf("タグフィルタのルートディレクトリが特定できませんでした")
+	}
+	displayRoot := index.displayRoot
+	if displayRoot == "" {
+		displayRoot = filepath.Base(index.rootDir)
+		if displayRoot == "" {
+			displayRoot = index.rootDir
+		}
+	}
+	fmt.Printf("タグ \"%s\" を含む %d 件のファイルだけを表示します。\n", tag, len(files))
+	return app.RunTagFiltered(index.rootDir, displayRoot, files, tag)
+}
+
 func buildFileTagIndex(path string) (tagIndex, error) {
-	tags, err := readFrontMatterTags(path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return tagIndex{}, err
+	}
+	tags, err := readFrontMatterTags(absPath)
 	if err != nil {
 		return tagIndex{}, err
 	}
 	if len(tags) == 0 {
 		return tagIndex{}, nil
 	}
-	displayPath := path
-	if abs, err := filepath.Abs(path); err == nil {
-		if wd, err := os.Getwd(); err == nil {
-			if rel, err := filepath.Rel(wd, abs); err == nil {
-				displayPath = rel
-			}
-		}
+	rootDir := filepath.Dir(absPath)
+	displayRoot := filepath.Base(rootDir)
+	if displayRoot == "" {
+		displayRoot = rootDir
 	}
 	var index tagIndex
+	index.rootDir = rootDir
+	index.displayRoot = displayRoot
+	relPath := filepath.Base(absPath)
+	fileKey := filepath.ToSlash(relPath)
 	for _, tag := range tags {
-		index.add(tag, displayPath)
+		index.add(tag, fileKey)
 	}
 	index.finalize()
 	return index, nil
@@ -256,6 +278,11 @@ func buildDirectoryTagIndex(root string) (tagIndex, error) {
 		return tagIndex{}, err
 	}
 	var index tagIndex
+	index.rootDir = absRoot
+	index.displayRoot = filepath.Base(absRoot)
+	if index.displayRoot == "" {
+		index.displayRoot = absRoot
+	}
 	err = filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
