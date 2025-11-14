@@ -12,8 +12,11 @@ func Run(target string) error {
 	if err != nil {
 		return err
 	}
+	return runProgram(state)
+}
 
+func runProgram(state ui.State) error {
 	program := tea.NewProgram(ui.NewModel(state), tea.WithAltScreen())
-	_, err = program.Run()
+	_, err := program.Run()
 	return err
 }
