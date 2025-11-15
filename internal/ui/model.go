@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -23,6 +24,7 @@ const (
 	minContentWidth   = 20
 	minTreePanelWidth = 18
 	defaultTreeWidth  = 28
+	treeResizeStep    = 4
 )
 
 var (
@@ -64,6 +66,7 @@ type Model struct {
 	width              int
 	height             int
 	err                error
+	treeWidthLocked    bool
 
 	treeRoot        *tree.Node
 	flatTree        []treeLine
@@ -174,6 +177,7 @@ func (m *Model) View() string {
 		helpContent := strings.Join([]string{
 			"ヘルプ (?:閉じる / Esc)",
 			"Ctrl+h / Ctrl+l : ツリー↔本文フォーカス切替",
+			"Alt+h / Alt+l   : サイドバー幅縮小 / 拡張",
 			"j / k            : 選択/スクロール (フォーカス中のペイン)",
 			"Ctrl+d / Ctrl+u : 半ページ移動 (本文フォーカス時)",
 			"Ctrl+f / Ctrl+b : 半ページ移動 (ツリーフォーカス時)",
@@ -237,6 +241,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		if msg.Alt && len(msg.Runes) == 1 {
+			switch unicode.ToLower(msg.Runes[0]) {
+			case 'h':
+				if m.adjustTreeWidth(-treeResizeStep) {
+					return m, nil
+				}
+			case 'l':
+				if m.adjustTreeWidth(treeResizeStep) {
+					return m, nil
+				}
+			}
+		}
+
 		key := msg.String()
 		if key != "g" {
 			m.pendingKey = ""
@@ -266,6 +283,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+l":
 			m.blurTree()
 			return m, nil
+		case "alt+h":
+			if m.adjustTreeWidth(-treeResizeStep) {
+				return m, nil
+			}
+		case "alt+l":
+			if m.adjustTreeWidth(treeResizeStep) {
+				return m, nil
+			}
 		case "t":
 			if m.treeRoot != nil {
 				m.treeVisible = !m.treeVisible
@@ -464,6 +489,30 @@ func (m *Model) resize(width, height int) {
 		m.treeVP.Width = 0
 		m.treeVP.Height = contentHeight
 	}
+}
+
+func (m *Model) adjustTreeWidth(delta int) bool {
+	if !m.treeVisible || m.width == 0 || delta == 0 {
+		return false
+	}
+	preferred := m.treePreferredWidth
+	if preferred <= 0 {
+		preferred = defaultTreeWidth
+	}
+	frame := m.treeVP.Style.GetHorizontalFrameSize()
+	minPanel := max(minTreePanelWidth-frame, 0)
+	maxPanel := max(m.width/2-frame, minPanel)
+	if maxPanel == 0 {
+		return false
+	}
+	newPreferred := clamp(preferred+delta, minPanel, maxPanel)
+	if newPreferred == preferred {
+		return false
+	}
+	m.treeWidthLocked = true
+	m.treePreferredWidth = newPreferred
+	m.resize(m.width, m.height)
+	return true
 }
 
 func (m *Model) treeWidth(totalWidth int) int {
@@ -684,7 +733,9 @@ func (m *Model) updateTreeContent(width int) {
 			builder.WriteByte('\n')
 		}
 	}
-	m.treePreferredWidth = max(width+4, minTreePanelWidth)
+	if !m.treeWidthLocked {
+		m.treePreferredWidth = max(width+4, minTreePanelWidth)
+	}
 	m.treeVP.SetContent(builder.String())
 	m.ensureSelectionVisible()
 }
